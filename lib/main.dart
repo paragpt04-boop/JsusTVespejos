@@ -515,7 +515,7 @@ class _HS extends State<HomeScreen> with TickerProviderStateMixin {
       Text('HISTORIAL', style: TextStyle(fontSize: 10, color: cDg,
         letterSpacing: 3, fontWeight: FontWeight.bold)),
     ])),
-    ..._history.map((h) => GestureDetector(
+    for (final h in _history) GestureDetector(
       onTap: () { _ctrl.text = h.domain; _search(); },
       child: Container(
         margin: const EdgeInsets.only(bottom: 6),
