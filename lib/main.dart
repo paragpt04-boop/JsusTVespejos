@@ -72,35 +72,97 @@ Future<MirrorResult> findMirrors(String input) async {
     } catch (_) {}
   }
 
-  // Step 3: Reverse IP lookup via HackerTarget
   final target = r.ip.isNotEmpty ? r.ip : domain;
+  final seen = <String>{domain};
+
+  // Source 1: HackerTarget reverseip
   try {
     final body = await _get('https://api.hackertarget.com/reverseiplookup/?q=' + target, timeout: 15);
     if (body != null && !body.contains('error') && !body.contains('API count')) {
-      final lines = body.split('\n')
-        .map((l) => l.trim())
-        .where((l) => l.isNotEmpty && l != domain && _isDomain(l))
-        .toSet()
-        .toList();
-      r.mirrors.addAll(lines);
-    }
-  } catch (_) {}
-
-  // Step 4: Also check HackerTarget hostsearch
-  try {
-    final body = await _get('https://api.hackertarget.com/hostsearch/?q=' + domain, timeout: 15);
-    if (body != null && !body.contains('error') && !body.contains('API count')) {
-      final lines = body.split('\n')
-        .where((l) => l.contains(','))
-        .map((l) => l.split(',')[0].trim())
-        .where((l) => l.isNotEmpty && l != domain && _isDomain(l))
-        .toSet()
-        .toList();
-      for (final l in lines) {
-        if (!r.mirrors.contains(l)) r.mirrors.add(l);
+      for (final l in body.split('\n')) {
+        final d = l.trim();
+        if (d.isNotEmpty && !seen.contains(d) && _isDomain(d)) {
+          seen.add(d); r.mirrors.add(d);
+        }
       }
     }
   } catch (_) {}
+
+  // Source 2: HackerTarget hostsearch
+  try {
+    final body = await _get('https://api.hackertarget.com/hostsearch/?q=' + domain, timeout: 15);
+    if (body != null && !body.contains('error') && !body.contains('API count')) {
+      for (final l in body.split('\n')) {
+        if (l.contains(',')) {
+          final d = l.split(',')[0].trim();
+          if (d.isNotEmpty && !seen.contains(d) && _isDomain(d)) {
+            seen.add(d); r.mirrors.add(d);
+          }
+        }
+      }
+    }
+  } catch (_) {}
+
+  // Source 3: ip-api batch - get org and find related
+  // Source 4: ViewDNS reverse IP
+  try {
+    final body = await _get(
+      'https://api.viewdns.info/reverseip/?host=' + target + '&apikey=free&output=json',
+      timeout: 15);
+    if (body != null && body.contains('domains')) {
+      try {
+        final data = jsonDecode(body);
+        final domains = data['response']?['domains'] as List?;
+        if (domains != null) {
+          for (final item in domains) {
+            final d = (item['name'] ?? '').toString().trim();
+            if (d.isNotEmpty && !seen.contains(d) && _isDomain(d)) {
+              seen.add(d); r.mirrors.add(d);
+            }
+          }
+        }
+      } catch (_) {}
+    }
+  } catch (_) {}
+
+  // Source 5: SecurityTrails free
+  try {
+    final body = await _get(
+      'https://api.securitytrails.com/v1/ips/nearby/' + target,
+      timeout: 10);
+    if (body != null && body.contains('records')) {
+      try {
+        final data = jsonDecode(body);
+        final records = data['records'] as List?;
+        if (records != null) {
+          for (final rec in records) {
+            final hostname = (rec['hostname'] ?? '').toString().trim();
+            if (hostname.isNotEmpty && !seen.contains(hostname) && _isDomain(hostname)) {
+              seen.add(hostname); r.mirrors.add(hostname);
+            }
+          }
+        }
+      } catch (_) {}
+    }
+  } catch (_) {}
+
+  // Source 6: DNS lookup for common subdomains
+  final prefixes = ['live', 'stream', 'panel', 'app', 'tv', 'iptv', 'play', 'cdn'];
+  final baseDomain = domain.split('.').length > 2
+    ? domain.split('.').skip(1).join('.')
+    : domain;
+  for (final prefix in prefixes) {
+    final sub = prefix + '.' + baseDomain;
+    if (!seen.contains(sub)) {
+      try {
+        final addrs = await InternetAddress.lookup(sub)
+          .timeout(const Duration(seconds: 3));
+        if (addrs.isNotEmpty) {
+          seen.add(sub); r.mirrors.add(sub);
+        }
+      } catch (_) {}
+    }
+  }
 
   // Remove duplicates and sort
   r.mirrors = r.mirrors.toSet().toList()..sort();
