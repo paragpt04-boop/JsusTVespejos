@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() => runApp(const App());
 
@@ -37,6 +38,8 @@ class MirrorResult {
   String isp = '';
   String asn = '';
   List<String> mirrors = [];
+  Map<String, bool> mirrorStatus = {};
+  int port = 0;
   bool loading = false;
   String error = '';
 }
@@ -167,7 +170,35 @@ Future<MirrorResult> findMirrors(String input) async {
   // Remove duplicates and sort
   r.mirrors = r.mirrors.toSet().toList()..sort();
 
+  // Extract port from original input
+  r.port = _extractPort(input);
+
+  // Verify which mirrors are reachable
+  final checks = r.mirrors.map((m) async {
+    final ok = await _isReachable(m);
+    r.mirrorStatus[m] = ok;
+  });
+  await Future.wait(checks);
+
   return r;
+}
+
+// Check if host is reachable
+Future<bool> _isReachable(String host, {int timeout = 3}) async {
+  try {
+    final addresses = await InternetAddress.lookup(host)
+      .timeout(Duration(seconds: timeout));
+    return addresses.isNotEmpty;
+  } catch (_) { return false; }
+}
+
+// Extract port from URL
+int _extractPort(String input) {
+  try {
+    final uri = Uri.parse(input.startsWith('http') ? input : 'http://' + input);
+    if (uri.port != 0 && uri.port != 80 && uri.port != 443) return uri.port;
+  } catch (_) {}
+  return 0;
 }
 
 bool _isDomain(String s) {
@@ -260,6 +291,45 @@ class _HS extends State<HomeScreen> with TickerProviderStateMixin {
       side: const BorderSide(color: cAc)),
   ));
 
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _loadHistory();
+  }
+
+  Future<void> _loadHistory() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final saved = prefs.getStringList('mirror_history') ?? [];
+      for (final s in saved) {
+        try {
+          final parts = s.split('|||');
+          if (parts.length >= 2) {
+            final r = MirrorResult();
+            r.domain = parts[0];
+            r.ip = parts.length > 1 ? parts[1] : '';
+            r.country = parts.length > 2 ? parts[2] : '';
+            r.mirrors = parts.length > 3 ? parts[3].split(',,') : [];
+            if (!_history.any((h) => h.domain == r.domain)) {
+              _history.add(r);
+            }
+          }
+        } catch (_) {}
+      }
+      if (mounted) setState(() {});
+    } catch (_) {}
+  }
+
+  Future<void> _saveHistory() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final saved = _history.map((r) =>
+        r.domain + '|||' + r.ip + '|||' + r.country + '|||' + r.mirrors.join(',,')
+      ).toList();
+      await prefs.setStringList('mirror_history', saved);
+    } catch (_) {}
+  }
+
   Future<void> _search() async {
     final input = _ctrl.text.trim();
     if (input.isEmpty) { _toast('Ingresa un dominio o URL'); return; }
@@ -270,7 +340,8 @@ class _HS extends State<HomeScreen> with TickerProviderStateMixin {
       _loading = false;
       if (!_history.any((h) => h.domain == r.domain)) {
         _history.insert(0, r);
-        if (_history.length > 10) _history.removeLast();
+        if (_history.length > 20) _history.removeLast();
+        _saveHistory();
       }
     });
   }
@@ -525,16 +596,36 @@ class _HS extends State<HomeScreen> with TickerProviderStateMixin {
                 border: Border(bottom: BorderSide(
                   color: e.key < r.mirrors.length - 1 ? cBl : Colors.transparent))),
               child: Row(children: [
-                Container(width: 6, height: 6, decoration: BoxDecoration(
+                Container(width: 8, height: 8, decoration: BoxDecoration(
                   shape: BoxShape.circle,
-                  color: cAc.withOpacity(0.6))),
+                  color: r.mirrorStatus[e.value] == true ? cG :
+                    r.mirrorStatus[e.value] == false ? cRe : cDg,
+                  boxShadow: [BoxShadow(
+                    color: (r.mirrorStatus[e.value] == true ? cG :
+                      r.mirrorStatus[e.value] == false ? cRe : cDg).withOpacity(0.5),
+                    blurRadius: 4)])),
                 const SizedBox(width: 10),
-                Expanded(child: Text(e.value,
-                  style: const TextStyle(fontSize: 12, color: cWh))),
+                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text(e.value, style: const TextStyle(fontSize: 12, color: cWh)),
+                  if (r.port != 0) Text(
+                    (r.mirrorStatus[e.value] == true ? '✓ Activo' :
+                      r.mirrorStatus[e.value] == false ? '✗ No responde' : '⏳ Verificando') +
+                    '  •  Puerto sugerido: ' + r.port.toString(),
+                    style: TextStyle(fontSize: 8,
+                      color: r.mirrorStatus[e.value] == true ? cG :
+                        r.mirrorStatus[e.value] == false ? cRe : cDg)),
+                  if (r.port == 0) Text(
+                    r.mirrorStatus[e.value] == true ? '✓ Activo' :
+                      r.mirrorStatus[e.value] == false ? '✗ No responde' : '⏳ Verificando',
+                    style: TextStyle(fontSize: 8,
+                      color: r.mirrorStatus[e.value] == true ? cG :
+                        r.mirrorStatus[e.value] == false ? cRe : cDg)),
+                ])),
                 GestureDetector(
                   onTap: () {
-                    Clipboard.setData(ClipboardData(text: e.value));
-                    _toast('Copiado: ' + e.value);
+                    final toCopy = r.port != 0 ? e.value + ':' + r.port.toString() : e.value;
+                    Clipboard.setData(ClipboardData(text: toCopy));
+                    _toast('Copiado: ' + toCopy);
                   },
                   child: Container(
                     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
